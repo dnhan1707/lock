@@ -8,7 +8,8 @@
     "scheme": "projectlock",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.danhtrinhan.projectlock"
     },
     "android": {
       "adaptiveIcon": {
@@ -37,6 +38,16 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "aff5a330-69e9-4b4e-951f-066e31e8b5b4"
+      }
     }
   }
 }
