@@ -1,0 +1,49 @@
+name: project-lock-backend
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lock}
+      POSTGRES_DB: ${POSTGRES_DB:-lock}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: applies Alembic migrations, then exits. The api waits for it.
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment: &app-env
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lock}:${POSTGRES_PASSWORD:-lock}@db:5432/${POSTGRES_DB:-lock}
+    # Mount the source so migrations and seeders always match the working tree, not the built image.
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    # --reload picks up code changes from the bind mount below. Dev only.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment: *app-env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
