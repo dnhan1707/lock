@@ -1,6 +1,6 @@
 # Project Lock: Build Plan
 
-Source docs: [user-stories.md](./user-stories.md), [building-phase.md](./building-phase.md), [api.md](./api.md), [database.md](./database.md), [backend README](../project-lock-backend/README.md).
+Source docs (start at [README.md](./README.md)): [user-stories.md](./user-stories.md), [building-phase.md](./building-phase.md), [decisions.md](./decisions.md), [api.md](./api.md), [database.md](./database.md), [external-tool-need.md](./external-tool-need.md), [backend README](../project-lock-backend/README.md).
 
 How to use: tick `[x]` when done. Each phase ends with a **Phase exit gate**. Do not start the next phase until the gate is green.
 
@@ -10,7 +10,7 @@ How to use: tick `[x]` when done. Each phase ends with a **Phase exit gate**. Do
 | --- | --- |
 | Backend (`project-lock-backend`) | FastAPI + async SQLAlchemy + Postgres 17 + Alembic in Docker. Only `GET /health` exists. No models, no migrations, no Redis, no auth, no tests. Seeder framework exists (`seeds/`). |
 | Frontend (`project-lock`) | Fresh Expo SDK 58 / React Native 0.88 / expo-router template. Only template screens (`index.tsx`, `explore.tsx`, tabs). No API client, state, auth, or tests. |
-| Docs | `api.md` and `database.md` are empty stubs. [decisions.md](./decisions.md) holds the approved choices. |
+| Docs | [database.md](./database.md) holds the schema design (not yet implemented). `api.md` is still an empty stub. [decisions.md](./decisions.md) holds the approved choices. Start at [README.md](./README.md). |
 
 ## 1. Decisions at a glance
 
@@ -33,7 +33,7 @@ Policy decisions (adopted): breakup window **72 hours**; at day 90 the leaver's 
 Checklist:
 - [x] Decisions recorded in [decisions.md](./decisions.md).
 - [x] Phase 1 workarounds decided (no Stripe or Twilio yet).
-- [ ] Short legal and store-policy note (see section 6B). Finish it before Phase 4.
+- [ ] Short legal and store-policy note (see section 6B). Finish it before Phase 3.
 - [ ] Keep [api.md](./api.md) and [database.md](./database.md) updated as each phase lands.
 
 ## 2. Cross-cutting setup (do once, early)
@@ -64,7 +64,7 @@ Only tooling that every phase shares. Phase-specific setup lives in each phase.
 
 ### Docs
 - [ ] Fill [api.md](./api.md) (endpoint table, request and response shapes, error codes) as endpoints land.
-- [ ] Fill [database.md](./database.md) (tables, constraints, ER diagram) as migrations land.
+- [ ] Fill [database.md](./database.md) as migrations land (the schema design is written; update it if a migration differs).
 
 ---
 
@@ -108,7 +108,7 @@ Full column list, constraints, and triggers: [database.md](./database.md) (Phase
 ### 1C. Login link, identity, and profile API (backend)
 - [ ] `POST /auth/link/start` `{phone, region}`: normalize and hash the phone, rate limit (Redis, per phone and per IP), create a `login_links` row with a 15-minute single-use token (only its hash is stored), and hand the link `projectlock://auth/verify?token=...` (or the `APP_BASE_URL` web equivalent) to the `LinkSender`. In dev the response includes the link and it is logged. The raw phone is never stored or logged.
 - [ ] `POST /auth/link/verify` `{token}`: in one transaction, check the token is unexpired and unconsumed, mark it consumed, create the user from `phone_hash` if new (status `pending_verification`) or find the existing one, and issue tokens. A user in the deletion cooldown who logs in has the deletion cancelled (Phase 3C).
-- [ ] `POST /verification/manual` (multipart: image, `document_number`, `country`): check image type and size, **discard the image**, hash the typed number, and reject with `ID_ALREADY_REGISTERED` if the `id_hash` exists. On success set `verified`, `verification_method='dev_manual'`, and write an `identity_verifications` row. This route is refused when `APP_ENV=production`.
+- [ ] `POST /verification/manual` (multipart: image, `document_number`, `country`): check image type and size, **discard the image**, hash the typed number, and reject with `ID_ALREADY_REGISTERED` if the `id_hash` exists (from Phase 3, `ALREADY_BOUND` instead when that account has an active lock, see 3A). On success set `verified`, `verification_method='dev_manual'`, and write an `identity_verifications` row. This route is refused when `APP_ENV=production`.
 - [ ] `POST /consents`: record accepted consent types and versions.
 - [ ] `POST /users/me/profile`: set handle, display name, and an optional photo (presigned upload to MinIO). Allowed only after verification.
 - [ ] `GET /users/me`.
@@ -163,6 +163,7 @@ Full definitions: [database.md](./database.md) (Phase 2 tables).
 
 ### 2B. Invite system (Redis)
 - [ ] `POST /binds` (by partner handle): create an invite with a TTL (for example 24h), one pending outgoing invite per sender.
+- [ ] `bind_requests` audit row: insert a `pending` row with the same ID as the Redis invite. Cancel, decline and accept set `status` and `resolved_at` (accept does it inside the 2C transaction). Invites found expired on read are marked `expired`, and the daily job marks any leftover `pending` rows older than the TTL as `expired`.
 - [ ] `GET /binds/incoming`, `GET /binds/outgoing`.
 - [ ] `POST /binds/{id}/cancel` (sender), `POST /binds/{id}/decline` (receiver).
 - [ ] Rate limiting (Redis counters): per-user and per-IP limits on creating invites and on handle lookups (prevents handle enumeration).
@@ -171,10 +172,11 @@ Full definitions: [database.md](./database.md) (Phase 2 tables).
   - [ ] Unit (fakeredis): TTL expiry, one pending invite per sender, rate-limit counters reset on window.
   - [ ] API: unknown handle, self handle, locked target (hand-off to Phase 3 behavior), expired invite, double accept.
   - [ ] Rate limiting returns 429 with `Retry-After`.
+  - [ ] Each invite outcome (cancel, decline, accept, expired) leaves the `bind_requests` row with the matching `status` and `resolved_at`.
 
 ### 2C. The transaction (accept and lock)
 - [ ] `POST /binds/{id}/accept` requires a **warning-flow completion token** (see 2D) so it cannot be accepted without going through all steps.
-- [ ] One DB transaction: lock both user rows in a fixed order (`SELECT ... FOR UPDATE`), re-check neither has an active relationship, insert `relationships`, `relationship_members` and `certificates`, delete the invite from Redis, and commit.
+- [ ] One DB transaction: lock both user rows in a fixed order (`SELECT ... FOR UPDATE`), re-check neither has an active relationship, insert `relationships`, `relationship_members` and `certificates`, set the `bind_requests` row to `accepted` with its `relationship_id`, delete the invite from Redis, and commit.
 - [ ] Idempotent: repeated accept returns the same result.
 - [ ] `GET /relationship` and `GET /certificate` (and a shareable PDF or image render later).
 - [ ] **Tests (concurrency, most critical):**
@@ -215,19 +217,20 @@ Full definitions: [database.md](./database.md) (Phase 2 tables).
 
 ### 3A. Rejection engine
 - [ ] Central check `assert_can_bind(user)`, used by: bind creation and bind accept. It fails with `ALREADY_BOUND` if the user has an active relationship.
-- [ ] Re-registration with the same ID or phone hash as a user who is in an active lock returns `ALREADY_BOUND`, even if they try a fresh account (the hash unique constraint plus the lookup of the existing account's relationship).
+- [ ] Re-registration with the same ID hash as a user who is in an active lock returns `ALREADY_BOUND`, even from a fresh account with a new phone (the hash unique constraint plus the lookup of the existing account's relationship). If the existing account is not locked, the error stays `ID_ALREADY_REGISTERED` (1C). The same phone needs no rule: it simply logs into the existing account.
+- [ ] A blocked re-registration writes a `reregistration_attempt` breach event on the existing account's relationship and pushes the partner (3B).
 - [ ] Error payload for the *new partner*: original partner's public profile (handle, display name, photo) and `locked_at`. Define exactly which fields are exposed.
 - [ ] **Tests:**
   - [ ] Locked user sends a bind: `ALREADY_BOUND`.
   - [ ] Someone invites a locked user: response includes the bound partner's profile.
-  - [ ] Locked user re-onboards with a new phone but the same ID: blocked and mapped back to the original account.
+  - [ ] Locked user re-onboards with a new phone but the same ID: blocked with `ALREADY_BOUND`, mapped back to the original account, and a `reregistration_attempt` breach event is written. An unlocked user doing the same gets `ID_ALREADY_REGISTERED` and no breach event.
   - [ ] After the relationship ended (breakup, divorce), the same user can bind again.
   - [ ] Response never leaks hashes or private data (field allowlist test).
 
 ### 3B. Snitch notifications
 - [ ] Tables `device_tokens` (`POST /devices` to register Expo push tokens) and `breach_events` (see [database.md](./database.md)). `breach_events` rows are append-only (trigger rejects UPDATE and DELETE; no such endpoints).
 - [ ] Push sender interface: Expo Push API over `httpx`, fake sender for tests. Run sends from FastAPI background tasks with retries.
-- [ ] `breach_events` table: `relationship_id`, `offender_user_id`, `type` (`new_bind_attempt`, `deletion_requested`), `created_at`. Append-only (no UPDATE or DELETE endpoints).
+- [ ] `breach_events` table: `relationship_id`, `offender_user_id`, `type` (`new_bind_attempt`, `reregistration_attempt`, `deletion_requested`), `created_at`. Append-only (no UPDATE or DELETE endpoints).
 - [ ] On a rejected attempt, write a breach event and push to the original partner.
 - [ ] `GET /relationship/breaches` for the shared dashboard "red flag".
 - [ ] **Tests:**
@@ -240,7 +243,7 @@ Full definitions: [database.md](./database.md) (Phase 2 tables).
 - [ ] `POST /users/me/deletion`: sets `status='deactivating'`, `deletion_scheduled_for = now + 90 days`, revokes refresh tokens, writes a `deletion_requested` breach event, and sends the "Your partner has initiated account deletion to escape the lock" push. The relationship **stays active**.
 - [ ] Any successful login (`/auth/link/verify`) clears `deletion_scheduled_for` and restores `verified`. The lock is unaffected.
 - [ ] Users in `deactivating` are hidden from handle search and invites. The Phase 5 ledger shows them as "Fled the App".
-- [ ] Daily purge job (`python -m app.jobs.purge`) for accounts past `deletion_scheduled_for`, in one transaction per user (it sets `app.allow_purge`): end the active relationship with `ended_reason='deletion_purge'` (partner is freed), wipe `id_hash`, `phone_hash`, handle, name, photo, and delete refresh tokens, device tokens, consents and identity verifications, keeping the `users` row as a tombstone (`status='purged'`). Per-table rules are in [database.md](./database.md) (purge table). Phase 4 extends the job to delete the leaver's vault posts, S3 objects and presence. The partner keeps their own posts in Past Matches. This is the only code path allowed to touch the immutable hash columns.
+- [ ] Daily purge job (`python -m app.jobs.purge`) for accounts past `deletion_scheduled_for`, in one transaction per user (it sets `app.allow_purge`): end the active relationship with `ended_reason='deletion_purge'` (partner is freed), wipe `id_hash`, `phone_hash`, handle, name, photo, and delete refresh tokens, device tokens, identity verifications and the leaver's `login_links` rows (consents are kept as proof of agreement), keeping the `users` row as a tombstone (`status='purged'`). Per-table rules are in [database.md](./database.md) (purge table). Phase 4 extends the job to delete the leaver's vault posts, S3 objects and presence. The partner keeps their own posts in Past Matches. This is the only code path allowed to touch the immutable hash columns.
 - [ ] Frontend: free "Delete Account" button in privacy settings with a clear 90-day explanation. After confirming, the app signs out and shows a "deletion scheduled, log in to cancel" screen. Logging back in shows a "deletion cancelled" confirmation.
 - [ ] **Tests:**
   - [ ] API: request deletion sets the status and date, revokes tokens, and keeps the relationship active; partner gets the push and a breach event.
@@ -251,8 +254,8 @@ Full definitions: [database.md](./database.md) (Phase 2 tables).
   - [ ] Frontend: delete flow signs out and shows the scheduled screen; re-login shows the cancelled state.
 
 ### 3D. Mutual breakup and Past Matches (free exit)
-- [ ] `POST /relationship/breakup-requests`: stores a request in Redis with a **72-hour TTL**, one open request per relationship, and pushes the partner.
-- [ ] `POST /relationship/breakup-requests/{id}/accept` (partner only) ends the lock instantly: in one transaction set the relationship `ended` (`ended_reason='mutual'`), flip `relationship_members.active` to false, and notify both users. `.../decline` and `.../cancel` also exist. Expired requests do nothing.
+- [ ] `POST /relationship/breakup-request`: stores a request in Redis under `breakup:{relationship_id}` with a **72-hour TTL** (one open request per relationship, so no separate request ID), and pushes the partner. `GET /relationship/breakup-request` returns the open request, if any.
+- [ ] `POST /relationship/breakup-request/accept` (partner only) ends the lock instantly: in one transaction set the relationship `ended` (`ended_reason='mutual'`), flip `relationship_members.active` to false, and notify both users. `.../decline` and `.../cancel` also exist. Expired requests do nothing.
 - [ ] `GET /past-matches` and `GET /past-matches/{relationship_id}`: read-only archive of ended relationships with their vault and certificate. Only the two former partners can read it. New posts are rejected on ended relationships.
 - [ ] Frontend: "Mutual Breakup" button, pending and incoming states with a countdown, the archive screen, and the home screen resetting to "ready to bind" after the break.
 - [ ] **Tests:**
@@ -320,11 +323,11 @@ Full definitions: [database.md](./database.md) (Phase 2 tables).
 
 ### 5A. Ledger search
 - [ ] Migration adds a trigram index on `lower(display_name)` for name search (see [database.md](./database.md)).
-- [ ] `POST /ledger/search` (name or phone). Phone search hashes the normalized input and compares to `phone_hash`. Name search returns only name matches that are public.
+- [ ] `POST /ledger/search` (name or phone). Signed-in, verified users only. Phone search hashes the normalized input and compares to `phone_hash`. Name search matches `lower(display_name)` and returns only users who are locked or in the deletion cooldown. Free users are `not_found`.
 - [ ] Response: `locked` / `not_found` / `fled`, and partner display info as allowed. `fled` is returned for users in the 90-day deletion cooldown. Never returns hashes or raw phone numbers. Users who have been purged are `not_found`.
 - [ ] Rate limiting and abuse controls (enumeration of phone numbers is the main risk): per-user and per-IP limits, auth required, daily cap.
 - [ ] **Tests:**
-  - [ ] API: locked user found by phone and by name; unknown returns `not_found`; a user in the deletion cooldown shows the `fled` placeholder state; a purged user is `not_found`.
+  - [ ] API: locked user found by phone and by name; unknown returns `not_found`; a user in the deletion cooldown shows the `fled` placeholder state; a purged user is `not_found`; a free (unlocked) user is `not_found` by name and by phone; an unauthenticated request gets 401.
   - [ ] Phone formats all resolve to the same hash match.
   - [ ] Rate limit and daily cap return 429.
   - [ ] Response allowlist test (no hashes or private fields).

@@ -181,6 +181,8 @@ One row per user per relationship. It exists because a user can be `user_a` in o
 | `relationship_id` | uuid FK, null | Set when accepted. |
 | `created_at`, `resolved_at` | timestamptz | |
 
+Lifecycle: inserted as `pending` with the invite, updated on cancel, decline, accept (inside the lock transaction) and expiry. See plan 2B and 2C. Kept at purge.
+
 ## Phase 3 tables
 
 ### `breach_events` (append-only)
@@ -190,7 +192,7 @@ One row per user per relationship. It exists because a user can be `user_a` in o
 | `id` | uuid PK | |
 | `relationship_id` | uuid FK to `relationships` | The original, still-active lock. |
 | `offender_user_id` | uuid FK to `users` | |
-| `type` | text, not null | `new_bind_attempt`, `deletion_requested`. |
+| `type` | text, not null | `new_bind_attempt`, `reregistration_attempt`, `deletion_requested`. |
 | `created_at` | timestamptz | |
 
 Trigger rejects `UPDATE` and `DELETE`. Index: `(relationship_id, created_at DESC)`.
@@ -287,8 +289,11 @@ Redis holds only disposable data. If it is lost, nothing permanent is lost.
 | `relationships` | If active: set `ended`, `ended_reason='deletion_purge'`. The partner is freed. |
 | `relationship_members` | Set `active = false`. |
 | `vault_posts` | Delete the leaver's posts and their S3 objects. The partner's posts stay. |
-| `presence`, `device_tokens`, `refresh_tokens`, `consents` | Delete the leaver's rows. |
+| `presence`, `device_tokens`, `refresh_tokens` | Delete the leaver's rows. |
 | `identity_verifications` | Delete the leaver's rows. |
+| `login_links` | Delete rows with the leaver's `phone_hash`, so no phone hash survives the purge. |
+| `consents` | Kept as proof of what the user agreed to. They hold only the user ID, type and version. |
+| `bind_requests` | Kept. They carry no personal data beyond user IDs. |
 | `breach_events` | Kept. They carry no personal data beyond user IDs. |
 | `certificates` | Kept (belong to the relationship). |
 
