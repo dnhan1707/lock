@@ -10,13 +10,13 @@ Goal: the smallest end-to-end version of the core idea. Two people create accoun
 - The phone number is **not verified** in v1. Verification (SMS) comes in a later version. Until then, the `phone_verified_at` field stays empty.
 - The phone is normalized to E.164 (`+14155550100`) before it is used, so `(415) 555-0100` and `+1 415 555 0100` are the same account.
 - Passwords are stored only as a slow hash (argon2 or bcrypt). Never the plain password.
-- ID verification is not required. It returns later as an optional "Verified Lock" upgrade (see [decisions](../technical-doc/decisions.md)).
+- ID verification is not required. It returns later as an optional "Verified Lock" upgrade.
 
 ## The main flow
 
 ### 1. User A signs up
 1. A opens the app and taps **Create account**.
-2. A enters phone number A and a password, then a display name.
+2. A enters phone number A and a password, then a first and last name.
 3. A lands on the **Single** home screen: "You're not locked to anyone yet." with a **Lock in with someone** button.
 
 ### 2. User B signs up
@@ -90,9 +90,7 @@ Push notifications replace the polling in a later version.
 ## What v1 builds
 
 ### Backend
-- `users`: `id`, `phone_hash` (unique), `password_hash`, `display_name`, `phone_verified_at` (always empty in v1), timestamps.
-- `invites`: `id`, `sender_id`, `token_hash` (unique), `status` (`pending`, `accepted`, `declined`, `cancelled`, `expired`, `superseded`), `accepted_by_id`, `expires_at`, `resolved_at`, timestamps. Stored in **Postgres, not Redis**, for v1: fewer moving parts and the audit trail comes for free. Expiry is checked on read (`expires_at < now`).
-- `relationships` + `relationship_members` with the partial unique index "one active lock per user" (as designed in [database.md](../technical-doc/database.md)).
+- Tables `users`, `refresh_tokens`, `invites`, `relationships`, `relationship_members`. Full schema: [database.md](../technical-doc/database.md) (Version 1). Invites are stored in **Postgres, not Redis**, for v1: fewer moving parts and the audit trail comes for free.
 - Endpoints: sign up, log in, refresh, `GET /me` (includes lock state), create invite, view invite by token, accept, decline, cancel, get my current invite.
 - The accept transaction locks both user rows in a fixed order, re-checks that both are free, creates the relationship, marks the invite `accepted`, and marks all other open invites from or to either user `superseded`.
 
